@@ -1,35 +1,37 @@
-# SCE power outage monitor — incident 800588256
+# SCE address-based outage monitor
 
-Uses two public ArcGIS outage feeds to check incident `800588256`, without scraping SCE's interactive website.
+Checks public SCE and California OES outage **point** data near a confidential service address. Does not search by a fixed outage number. The GitHub workflow runs hourly at minute 17 UTC (GitHub schedules can be delayed).
 
-- **Primary:** public SCE incident layer, keyed by `IncidentId`.
-- **Fallback:** California OES Power Outage Incidents view.
-- **Schedule:** hourly at minute 17 UTC via `.github/workflows/sce-outage.yml`; GitHub may delay starts.
-- **History:** GitHub issue named `SCE outage 800588256 status`. Each detected change is posted in a timestamped comment using Pacific time. The issue body stores the last snapshot.
-- **Tracking:** estimated restoration, repair and crew status, cause, customer count, and incident timestamps.
-- **Safety:** disappearance of an incident from a feed does **not** establish that power is restored. Only physical confirmation or utility confirmation can do that.
-- **Limits:** upstream data may lag or not include the incident. The first execution may report "not listed". Errors and no-record results are clearly identified.
+## Required one-time setup
 
-## Test it
+1. Go to [repository Actions secrets](https://github.com/mattcarrollcode/Llm-playground/settings/secrets/actions).
+2. Select **New repository secret**.
+3. Name it exactly **SCE_SERVICE_ADDRESS**.
+4. Set the value to the complete SCE service street address, including city, state and ZIP.
+5. Save it. The next hourly job will use it; you can also start an immediate run under [Actions → SCE outage](https://github.com/mattcarrollcode/Llm-playground/actions/workflows/sce-outage.yml) → **Run workflow**.
 
-1. Open [the workflow in GitHub Actions](../../actions/workflows/sce-outage.yml).
-2. Select **Run workflow** to execute it once now. (ChatGPT GitHub tools do not currently provide a workflow-dispatch action.)
-3. Open the run log to verify API connectivity and that the job completes. A successful job can still report "not listed", which is not restoration proof.
-4. Find the created [status issue](../../issues?q=is%3Aissue+SCE+outage+800588256) and click **Subscribe** so GitHub can notify you of future comments.
-5. Enable GitHub mobile push notifications for subscribed issue activity if desired.
+The monitored street address is never included in this public repository's source code or GitHub issue comments. It is sent to a geocoding provider and transformed into location coordinates in the ephemeral GitHub Actions runner. Those coordinates are not published to the issue.
 
-The workflow requests `issues: write` for its built-in `GITHUB_TOKEN`. If the run gets a 403 on issues, check repository **Settings → Actions → General → Workflow permissions** and ensure writing to issues is permitted.
+Do **not** enter the street address as a GitHub issue comment, workflow input, or public repository variable.
 
-## Run locally
+## What it can and cannot tell you
 
-```shell
-python3 sce-outage/monitor.py
-```
+- SCE's open ArcGIS feature service provides **incident points**, not verified maps showing every affected address.
+- The script geocodes the confidential street address (Census Geocoder, with Esri fallback) and queries nearby outage points within a **3-mile radius**.
+- Each nearby event's incident ID, status, cause, customer count and restoration estimate are recorded in [status issue #1](https://github.com/mattcarrollcode/Llm-playground/issues/1).
+- The issue only gets a new comment when tracked incident data changes. Subscribe to the issue and enable GitHub notifications.
+- **A nearby outage is not proof your address is impacted.** No nearby outage, or an incident disappearing, is **not proof power was restored at the house**. Exact service-address outage matching requires SCE's own [interactive address search](https://www.sce.com/outages-safety/outage-center/check-outage-status) or a verified address-level API.
 
-No additional Python packages are needed, and no secret tokens are required in repository settings. The GitHub workflow uses the built-in `GITHUB_TOKEN`.
+If geocoding fails or neither feed is accessible, the job fails rather than publishing an incorrect "all clear."
 
-## Stopping monitoring
+## Usage
 
-Delete or disable the workflow from the **Actions** tab after the outage is over. The schedule does not stop automatically.
+Run with GitHub Actions. No external Python packages or additional API tokens are required; posting changes to the GitHub issue uses the built-in GITHUB_TOKEN.
 
-This monitor does not independently verify household electrical service or guarantee GitHub notification delivery.
+To run locally:
+
+\`\`\`shell
+SCE_SERVICE_ADDRESS="(your full address)" python3 sce-outage/monitor.py
+\`\`\`
+
+GitHub notification delivery may be delayed or filtered by your GitHub mobile/app settings. Disable the workflow when monitoring is no longer needed.
