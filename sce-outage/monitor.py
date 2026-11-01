@@ -229,7 +229,7 @@ def update_issue(snapshot, checked_at):
         new_issue = {"title": ISSUE_TITLE, "body": body(state)}
         if issue.get("state") == "closed":
             new_issue["state"] = "open"
-        if updates or issue.get("title") != ISSUE_TITLE:
+        if previous != state or issue.get("title") != ISSUE_TITLE:
             issue = gh(root + f"/issues/{issue['number']}", "PATCH", new_issue)
     if updates:
         details = "\n".join("- " + line for line in updates)
