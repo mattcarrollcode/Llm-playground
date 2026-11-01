@@ -1,176 +1,260 @@
 #!/usr/bin/env python3
-"""Monitor SCE incident 800588256 via public ArcGIS feeds; write updates to a GitHub issue.
+"""SCE monitor: geocode private service address; find nearby public outage incidents.
 
-The outage disappearing from a public feed is not proof that power was restored.
-Requires Python 3.11+; no third-party packages or stored credentials.
+The public SCE ArcGIS layer provides INCIDENT POINTS, not a coverage-by-address map.
+A nearby incident does not prove the address is affected; no incident does not
+prove electricity has been restored. Never print or publish the street address.
 """
-import argparse
 import json
+import math
 import os
 import re
 from datetime import datetime
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-OUTAGE_ID = 800588256
-SCE_URL = "https://services5.arcgis.com/z6hI6KRjKHvhNO0r/ArcGIS/rest/services/Outages_P_VwLayer/FeatureServer/0/query"
-CAL_OES_URL = "https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/Power_Outages_%28View%29/FeatureServer/0/query"
 PACIFIC = ZoneInfo("America/Los_Angeles")
-ISSUE_TITLE = f"SCE outage {OUTAGE_ID} status"
-STATE_MARKER = "<!-- SCE-OUTAGE-MONITOR-STATE -->"
+SCE = "https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/Outages_P_VwLayer/FeatureServer/0/query"
+CAL_OES = "https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/Power_Outages_(View)/FeatureServer/0/query"
+CENSUS = "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress"
+ESRI = "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
+ISSUE_TITLE = "SCE nearby outages (address-based)"
+LEGACY_TITLE = "SCE outage 800588256 status"
+STATE_START = "<!-- SCE_NEARBY_STATE_BEGIN -->"
+STATE_END = "<!-- SCE_NEARBY_STATE_END -->"
 FIELDS = (
-    "ERT", "ERT_LOC", "JobStatus", "CrewStatusCdDesc", "MemoCauseCdDesc",
-    "NoOfAffectedCust_Inci", "LastChngDateTime", "OutageStartDateTime",
-    "EstimatedRestoreDate", "OutageStatus", "ImpactedCustomers", "Cause", "StartDate",
+    "IncidentId", "IncidentType", "JobStatus", "CrewStatusCdDesc",
+    "MemoCauseCdDesc", "NoOfAffectedCust_Inci", "ERT", "ERT_LOC",
+    "OutageStartDateTime", "LastChngDateTime", "ResultCdDesc",
+    "OutageStatus", "Cause", "ImpactedCustomers", "StartDate",
+    "EstimatedRestoreDate", "OutageType",
 )
 
-def get_json(url, params=None, token=None, method="GET", body=None):
+def api(url, params=None, token=None, method="GET", payload=None):
     if params:
         url += ("&" if "?" in url else "?") + urlencode(params)
-    headers = {"Accept": "application/json", "User-Agent": "sce-outage-monitor/1.0"}
+    headers = {"Accept": "application/json", "User-Agent": "SCE-nearby-monitor/1.0"}
     if token:
         headers.update({
             "Authorization": "Bearer " + token,
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         })
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = Request(url, data=data, headers=headers, method=method)
-    with urlopen(req, timeout=25) as response:
-        obj = json.load(response)
-    if isinstance(obj, dict) and obj.get("error"):
-        raise RuntimeError(str(obj["error"]))
-    return obj
+    data = json.dumps(payload).encode() if payload is not None else None
+    with urlopen(Request(url, headers=headers, data=data, method=method), timeout=25) as response:
+        result = json.load(response)
+    if isinstance(result, dict) and result.get("error"):
+        raise ValueError("API error: " + str(result["error"]))
+    return result
 
-def query_outage():
+def validate_match(address, matched):
+    number = re.match(r"^\s*(\d+)", address)
+    if not number or not re.search(r"\b" + re.escape(number.group(1)) + r"\b", matched):
+        raise ValueError("Geocoder returned a non-address-level match; refusing to guess coordinates")
+    postal = re.search(r"\b(\d{5})(?:-\d{4})?\s*$", address)
+    if postal and postal.group(1) not in matched:
+        raise ValueError("Geocoder returned a different ZIP; refusing to guess coordinates")
+
+def geocode(address):
     errors = []
-    succeeded = 0
-    queries = (
-        ("SCE ArcGIS", SCE_URL, f"IncidentId={OUTAGE_ID}"),
-        ("California OES ArcGIS", CAL_OES_URL, f"IncidentId='{OUTAGE_ID}'"),
-    )
-    for source, endpoint, where in queries:
-        try:
-            result = get_json(endpoint, {
-                "f": "json", "where": where,
-                "outFields": "*", "returnGeometry": "false",
-            })
-            succeeded += 1
-            features = result.get("features", [])
-            if features:
-                attrs = features[0].get("attributes", {})
-                return {
-                    "availability": "found",
-                    "source": source,
-                    "fields": {k: attrs[k] for k in FIELDS if k in attrs},
-                    "raw": attrs,
-                    "errors": errors,
-                }
-        except (OSError, ValueError, RuntimeError, HTTPError, URLError) as exc:
-            errors.append(f"{source}: {exc}")
-    return {
-        "availability": "not_listed" if succeeded else "unavailable",
-        "source": None,
-        "fields": {},
-        "raw": {},
-        "errors": errors,
-    }
-
-def snapshot(report):
-    return {k: report[k] for k in ("availability", "source", "fields")}
-
-def fmt_value(v):
-    if isinstance(v, (int, float)) and v > 1_000_000_000_000:
-        try:
-            return datetime.fromtimestamp(v / 1000, PACIFIC).strftime("%Y-%m-%d %I:%M %p %Z")
-        except (OverflowError, ValueError):
-            pass
-    return str(v)
-
-def diff(previous, current):
-    if previous is None:
-        return ["Initial observation (not proof of restoration)."]
-    changes = []
-    if previous.get("availability") != current.get("availability"):
-        new_state = current["availability"]
-        if new_state == "not_listed":
-            new_state += " (NOT confirmed restored)"
-        changes.append(f"Availability: {previous.get('availability')} → {new_state}")
-    if previous.get("source") != current.get("source"):
-        changes.append(f"Source: {previous.get('source')} → {current.get('source')}")
-    if current["availability"] == "found" and previous.get("availability") == "found":
-        a, b = previous.get("fields", {}), current.get("fields", {})
-        for key in sorted(set(a) | set(b)):
-            if a.get(key) != b.get(key):
-                changes.append(f"{key}: {fmt_value(a.get(key))} → {fmt_value(b.get(key))}")
-    return changes
-
-def issue_body(state):
-    return (
-        f"Hourly tracking for SCE incident #{OUTAGE_ID}. This issue stores the latest "
-        "observed state, with a timestamped history in comments.\n\n"
-        "Subscribe to this issue for GitHub notifications. **An outage disappearing "
-        "from a data feed is not proof of service restoration.**\n\n"
-        f"{STATE_MARKER}\n```json\n{json.dumps(state, indent=2, sort_keys=True)}\n```\n"
-    )
-
-def load_issue_state(body):
-    pattern = re.escape(STATE_MARKER) + r"\s*```json\s*(.*?)\s*```"
-    m = re.search(pattern, body or "", re.DOTALL)
-    if not m:
-        return None
     try:
-        return json.loads(m.group(1))
-    except ValueError:
-        return None
+        response = api(CENSUS, {
+            "address": address, "benchmark": "Public_AR_Current",
+            "vintage": "Current_Current", "format": "json",
+        })
+        matches = response.get("result", {}).get("addressMatches", [])
+        if matches:
+            match = matches[0]
+            validate_match(address, match["matchedAddress"])
+            point = match["coordinates"]
+            return float(point["y"]), float(point["x"])
+        errors.append("Census: no address-level match")
+    except Exception as exc:
+        errors.append("Census geocoder: " + type(exc).__name__)
+    try:
+        response = api(ESRI, {
+            "SingleLine": address, "f": "json", "maxLocations": 1,
+            "outFields": "Addr_type,Match_addr,Postal",
+        })
+        matches = response.get("candidates", [])
+        if matches:
+            match = matches[0]
+            if float(match.get("score", 0)) < 90:
+                raise ValueError("low-confidence match")
+            if match.get("attributes", {}).get("Addr_type") not in (
+                "PointAddress", "StreetAddress", "Subaddress", "StreetInt"
+            ):
+                raise ValueError("not an address-level match")
+            validate_match(address, match.get("address", ""))
+            return float(match["location"]["y"]), float(match["location"]["x"])
+        errors.append("Esri: no address-level match")
+    except Exception as exc:
+        errors.append("Esri geocoder: " + type(exc).__name__)
+    raise RuntimeError("Could not geocode service address reliably: " + "; ".join(errors))
 
-def github(method, path, token, data=None):
-    return get_json("https://api.github.com" + path, token=token, method=method, body=data)
+def distance_miles(a_lat, a_lon, b_lat, b_lon):
+    p1, p2 = math.radians(a_lat), math.radians(b_lat)
+    dp = p2 - p1
+    dl = math.radians(b_lon - a_lon)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 3958.8 * 2 * math.asin(min(1, math.sqrt(h)))
 
-def publish(report, checked_at):
-    token = os.environ["GITHUB_TOKEN"]
+def query_layer(url, lat, lon, radius):
+    dy = radius / 69.0
+    dx = radius / (69.0 * max(0.01, math.cos(math.radians(lat))))
+    envelope = ",".join(f"{value:.7f}" for value in (
+        lon - dx, lat - dy, lon + dx, lat + dy
+    ))
+    response = api(url, {
+        "f": "json", "where": "1=1",
+        "geometry": envelope, "geometryType": "esriGeometryEnvelope",
+        "spatialRel": "esriSpatialRelIntersects", "inSR": 4326,
+        "outSR": 4326, "outFields": "*", "returnGeometry": "true",
+        "resultRecordCount": 2000,
+    })
+    if response.get("exceededTransferLimit"):
+        raise RuntimeError("Outage layer returned truncated data")
+    features = response.get("features")
+    if features is None:
+        raise ValueError("No features array in ArcGIS response")
+    matches = {}
+    for f in features:
+        geometry = f.get("geometry") or {}
+        if "x" not in geometry or "y" not in geometry:
+            continue
+        d = distance_miles(lat, lon, float(geometry["y"]), float(geometry["x"]))
+        if d > radius:
+            continue
+        a = f.get("attributes") or {}
+        incident = a.get("IncidentId")
+        if not incident:
+            continue
+        # SCE results are outage events; California's feed includes other utilities.
+        if url == CAL_OES and "southern california edison" not in str(a.get("UtilityCompany", "")).lower():
+            continue
+        key = str(incident)
+        details = {field: a[field] for field in FIELDS if a.get(field) is not None}
+        details["point_distance_miles"] = round(d, 1)
+        matches[key] = details
+    return matches
+
+def current_snapshot(address, radius):
+    lat, lon = geocode(address)
+    errors = []
+    for name, url in (("SCE public ArcGIS", SCE), ("California OES public ArcGIS", CAL_OES)):
+        try:
+            matches = query_layer(url, lat, lon, radius)
+            return {"method": "nearby_points_not_address_coverage",
+                    "source": name, "radius_miles": radius,
+                    "outages": matches, "errors": errors}
+        except Exception as exc:
+            errors.append(name + ": " + type(exc).__name__ + " (" + str(exc)[:150] + ")")
+    raise RuntimeError("Both outage data sources failed: " + "; ".join(errors))
+
+def public_snapshot(snapshot):
+    return {k: snapshot[k] for k in ("method", "source", "radius_miles", "outages")}
+
+def fmt(value):
+    if isinstance(value, (int, float)) and value > 1e12:
+        try:
+            return datetime.fromtimestamp(value / 1000, PACIFIC).strftime("%Y-%m-%d %I:%M %p %Z")
+        except (ValueError, OverflowError):
+            pass
+    return str(value)
+
+def changes(previous, current):
+    if not previous or previous.get("method") != current["method"]:
+        return ["Address-based monitoring initialized. Outage points indicate proximity, not confirmed service impact."]
+    old = previous.get("outages", {})
+    new = current["outages"]
+    result = []
+    for key in sorted(set(new) - set(old)):
+        result.append(f"Nearby incident {key} appeared ({new[key].get('point_distance_miles')} miles from address).")
+    for key in sorted(set(old) - set(new)):
+        result.append(f"Nearby incident {key} is no longer listed; restoration at the property is NOT confirmed.")
+    for key in sorted(set(old) & set(new)):
+        a, b = old[key], new[key]
+        for field in sorted(set(a) | set(b)):
+            if a.get(field) != b.get(field):
+                result.append(f"Incident {key}, {field}: {fmt(a.get(field))} → {fmt(b.get(field))}")
+    if previous.get("source") != current["source"]:
+        result.append(f"Source changed: {previous.get('source')} → {current['source']}")
+    return result
+
+def body(state):
+    return (
+        "**This monitor looks up SCE outages near a privately configured service address.** "
+        "Public incident points do not identify exactly which homes are affected. "
+        "**No nearby outage** and **outage no longer listed** do not prove electrical service is restored.\n\n"
+        "Subscribe to this issue to receive notifications about detected changes. "
+        "The precise address and geocoded coordinates are not logged here.\n\n"
+        f"{STATE_START}\n"
+        + json.dumps(state, sort_keys=True, indent=2) + "\n"
+        + f"{STATE_END}\n"
+    )
+
+def old_state(content):
+    if STATE_START in (content or "") and STATE_END in (content or ""):
+        try:
+            return json.loads(content.split(STATE_START, 1)[1].split(STATE_END, 1)[0].strip())
+        except ValueError:
+            pass
+    return None
+
+def gh(path, method="GET", payload=None):
+    return api("https://api.github.com" + path,
+               token=os.environ["GITHUB_TOKEN"], method=method, payload=payload)
+
+def update_issue(snapshot, checked_at):
     repo = os.environ["GITHUB_REPOSITORY"]
-    base = f"/repos/{repo}"
-    # The repository is dedicated to experimentation. This issue is the state store.
-    issues = github("GET", base + "/issues?state=all&per_page=100", token)
-    issue = next((i for i in issues if i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
-    state = snapshot(report)
-    old = load_issue_state(issue.get("body")) if issue else None
-    changes = diff(old, state)
-
-    if issue is None:
-        issue = github("POST", base + "/issues", token, {"title": ISSUE_TITLE, "body": issue_body(state)})
-    elif issue.get("state") == "closed":
-        issue = github("PATCH", base + f"/issues/{issue['number']}", token, {"state": "open"})
-    if changes:
-        details = "\n".join("- " + line for line in changes)
-        note = (
-            f"SCE incident **#{OUTAGE_ID}**, checked **{checked_at} Pacific**.\n\n"
-            f"{details}\n\n"
-            f"Data source: {report['source'] or 'No usable feed'}\n"
-        )
-        if report["errors"]:
-            note += "\nFeed errors: " + "; ".join(report["errors"]) + "\n"
-        github("POST", base + f"/issues/{issue['number']}/comments", token, {"body": note})
-        github("PATCH", base + f"/issues/{issue['number']}", token, {"body": issue_body(state)})
-    print("Issue: " + issue.get("html_url", ""))
-    print("Changes: " + json.dumps(changes, ensure_ascii=False))
+    root = f"/repos/{repo}"
+    issue_list = gh(root + "/issues?state=all&per_page=100")
+    issue = next((i for i in issue_list if i.get("title") in (ISSUE_TITLE, LEGACY_TITLE)
+                  and "pull_request" not in i), None)
+    state = public_snapshot(snapshot)
+    previous = old_state(issue.get("body")) if issue else None
+    updates = changes(previous, state)
+    if not issue:
+        issue = gh(root + "/issues", "POST", {"title": ISSUE_TITLE, "body": body(state)})
+    else:
+        # Preserve the issue number and subscriptions from the previous monitor.
+        new_issue = {"title": ISSUE_TITLE, "body": body(state)}
+        if issue.get("state") == "closed":
+            new_issue["state"] = "open"
+        if updates or issue.get("title") != ISSUE_TITLE:
+            issue = gh(root + f"/issues/{issue['number']}", "PATCH", new_issue)
+    if updates:
+        details = "\n".join("- " + line for line in updates)
+        note = (f"**Checked:** {checked_at} (Pacific)\n\n{details}\n\n"
+                f"Source: {snapshot['source']}; search radius: {snapshot['radius_miles']} miles.\n")
+        gh(root + f"/issues/{issue['number']}/comments", "POST", {"body": note})
+    print("Issue:", issue.get("html_url", ""))
+    print("Changes:", json.dumps(updates, ensure_ascii=False))
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--github", action="store_true", help="Write changed status to GitHub issue")
-    args = parser.parse_args()
-    checked_at = datetime.now(PACIFIC).strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    report = query_outage()
-    print(json.dumps({"checked_at_pacific": checked_at, "incident": OUTAGE_ID,
-                      "snapshot": snapshot(report), "errors": report["errors"]},
-                     ensure_ascii=False, indent=2))
-    if args.github:
-        publish(report, checked_at)
-    if report["availability"] == "unavailable":
-        raise SystemExit("Both outage feeds failed; current incident status could not be verified")
+    address = os.environ.get("SCE_SERVICE_ADDRESS", "").strip()
+    if not address:
+        raise SystemExit(
+            "SETUP REQUIRED: Add SCE_SERVICE_ADDRESS in GitHub repo Settings → "
+            "Secrets and variables → Actions → New repository secret. "
+            "Do NOT commit the street address to the public repository."
+        )
+    try:
+        radius = float(os.environ.get("SCE_SEARCH_RADIUS_MILES", "3"))
+        if not (0.5 <= radius <= 15):
+            raise ValueError("radius out of range")
+        result = current_snapshot(address, radius)
+    except Exception as exc:
+        raise SystemExit("Outage check failed: " + str(exc)) from exc
+    checked = datetime.now(PACIFIC).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+    print(json.dumps({"checked_at": checked, "source": result["source"],
+                      "possible_nearby_incidents": len(result["outages"]),
+                      "incident_ids": sorted(result["outages"].keys())}, indent=2))
+    if os.environ.get("GITHUB_TOKEN"):
+        update_issue(result, checked)
+    else:
+        print(json.dumps(public_snapshot(result), indent=2))
 
 if __name__ == "__main__":
     main()
