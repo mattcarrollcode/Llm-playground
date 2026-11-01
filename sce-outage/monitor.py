@@ -127,6 +127,10 @@ def query_layer(url, lat, lon, radius):
         if d > radius:
             continue
         a = f.get("attributes") or {}
+        # Scheduled maintenance entries should not be treated as live repair outages.
+        # SCE marks them as planned ('PO') and scheduled ('S'). 
+        if str(a.get("IncidentType", "")).upper() == "PO" and str(a.get("OutageType", "")).upper() == "S":
+            continue
         incident = a.get("IncidentId")
         if not incident:
             continue
@@ -166,7 +170,10 @@ def fmt(value):
 def changes(previous, current):
     if not previous or previous.get("method") != current["method"]:
         return ["Address-based monitoring initialized. Outage points indicate proximity, not confirmed service impact."]
-    old = previous.get("outages", {})
+    # Ignore planned maintenance from the previous snapshot during migration.
+    old = {k: v for k, v in previous.get("outages", {}).items()
+           if not (str(v.get("IncidentType", "")).upper() == "PO"
+                   and str(v.get("OutageType", "")).upper() == "S")}
     new = current["outages"]
     result = []
     for key in sorted(set(new) - set(old)):
