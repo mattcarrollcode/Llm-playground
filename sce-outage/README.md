@@ -1,6 +1,6 @@
 # SCE address-based outage monitor
 
-Checks public SCE and California OES outage **point** data near a confidential service address. Does not search by a fixed outage number. The GitHub workflow runs hourly at minute 17 UTC (GitHub schedules can be delayed).
+Checks public SCE and California OES outage **point** data near a confidential service address. Does not search by a fixed outage number. The GitHub workflow is scheduled every 10 minutes at minutes 07, 17, 27, 37, 47 and 57 UTC (GitHub schedules can be delayed).
 
 ## Required one-time setup
 
