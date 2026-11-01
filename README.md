@@ -1,7 +1,7 @@
 # LLM Playground
 
-## SCE Outage Monitor
+## SCE outage monitor
 
-This repository contains an hourly SCE outage monitor for incident `800588256`.
+An hourly GitHub Actions workflow monitors public SCE outage incidents near a privately configured service address. It does not depend on a fixed outage number.
 
-See [`sce-outage/README.md`](sce-outage/README.md) for its setup, limitations, and instructions for subscribing to updates.
+Setup and important limitations: [`sce-outage/README.md`](sce-outage/README.md).
