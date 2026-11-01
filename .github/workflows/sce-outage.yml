@@ -1,6 +1,11 @@
 name: SCE outage 800588256
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'sce-outage/**'
+      - '.github/workflows/sce-outage.yml'
   schedule:
     # Hourly at :17 UTC. GitHub can delay scheduled workflow starts.
     - cron: '17 * * * *'
