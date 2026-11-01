@@ -28,8 +28,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Query SCE outage and log changes
+      - name: Check Python syntax
+        run: python -m py_compile sce-outage/monitor.py
+      - name: Query SCE outages near private address and log changes
         env:
+          SCE_SERVICE_ADDRESS: ${{ secrets.SCE_SERVICE_ADDRESS }}
+          SCE_SEARCH_RADIUS_MILES: '3'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python sce-outage/monitor.py --github
