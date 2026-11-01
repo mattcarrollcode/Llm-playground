@@ -17,8 +17,8 @@ Do **not** enter the street address as a GitHub issue comment, workflow input, o
 ## What it can and cannot tell you
 
 - SCE's open ArcGIS feature service provides **incident points**, not verified maps showing every affected address.
-- The script geocodes the confidential street address (Census Geocoder, with Esri fallback) and queries nearby outage points within a **3-mile radius**.
-- Each nearby event's incident ID, status, cause, customer count and restoration estimate are recorded in [status issue #1](https://github.com/mattcarrollcode/Llm-playground/issues/1).
+- The script geocodes the confidential street address (Census Geocoder, with Esri fallback) and queries nearby outage points within a **3-mile radius**, filtering SCE entries explicitly classified as scheduled maintenance.
+- Nearby unscheduled repair events' incident IDs, status, cause, customer count and restoration estimates are recorded in [status issue #1](https://github.com/mattcarrollcode/Llm-playground/issues/1).
 - The issue only gets a new comment when tracked incident data changes. Subscribe to the issue and enable GitHub notifications.
 - **A nearby outage is not proof your address is impacted.** No nearby outage, or an incident disappearing, is **not proof power was restored at the house**. Exact service-address outage matching requires SCE's own [interactive address search](https://www.sce.com/outages-safety/outage-center/check-outage-status) or a verified address-level API.
 
