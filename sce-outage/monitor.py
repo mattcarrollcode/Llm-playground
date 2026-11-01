@@ -131,7 +131,7 @@ def query_layer(url, lat, lon, radius):
         if not incident:
             continue
         # SCE results are outage events; California's feed includes other utilities.
-        if url == CAL_OES and "southern california edison" not in str(a.get("UtilityCompany", "")).lower():
+        if url == CAL_OES and not any(name in str(a.get("UtilityCompany", "")).lower() for name in ("southern california edison", "sce")):
             continue
         key = str(incident)
         details = {field: a[field] for field in FIELDS if a.get(field) is not None}
